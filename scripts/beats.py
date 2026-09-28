@@ -8,6 +8,7 @@ Transcribes a local video with Whisper (word timestamps), then prints:
 The script reports facts; semantic refinement (phrase meaning) is Claude's job.
 Idempotent: reuses <video stem>.json if present unless --force.
 """
+from __future__ import annotations
 import argparse
 import json
 import shutil

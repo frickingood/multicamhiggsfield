@@ -1,6 +1,6 @@
 ---
 name: multicam
-description: Use when the user drops or points at a local talking-head video and wants the virtual multi-camera / multi-angle edit prompt for Google Omni (one real take turned into hard cuts between virtual camera angles). Triggers on /multicam, "multicam prompt", "multi-angle edit", a dropped .mp4 plus a camera-cuts request. PT examples for reliability: "faz o prompt multicam desse vídeo", "gera os cortes de câmera desse vídeo", "transforma esse take em multi-ângulo".
+description: Use when the user drops or points at a local talking-head video and wants the virtual multi-camera / multi-angle edit prompt for Google Omni (one real take turned into hard cuts between virtual camera angles), optionally generated end-to-end via the Higgsfield MCP with the original audio remuxed back on. Triggers on /multicam, "multicam prompt", "multi-angle edit", a dropped .mp4 plus a camera-cuts request. PT examples for reliability: "faz o prompt multicam desse vídeo", "gera os cortes de câmera desse vídeo", "transforma esse take em multi-ângulo".
 ---
 
 # /multicam: One Take → Virtual Multi-Camera
@@ -67,7 +67,36 @@ Mutate ONLY:
 - any angle description the user asked to swap (presets below);
 - the subject words inside the angle descriptions — "The man"/"his" → "The woman"/"her" or "The subject"/"their", matching whoever is on screen (extract one frame with ffmpeg and look, if unsure).
 
-Deliver the finished prompt in a fenced code block AND save it as `<video basename>_multicam_prompt.txt` next to the video. Close with usage: upload the source video into Google Omni, select it as source footage, paste the prompt. The delivered prompt is ALWAYS in English, whatever language the conversation or the video is in.
+Deliver the finished prompt in a fenced code block AND save it as `<video basename>_multicam_prompt.txt` next to the video. The delivered prompt is ALWAYS in English, whatever language the conversation or the video is in.
+
+Then ask (don't assume): generate it now via the Higgsfield MCP (Step 5), or just hand over the prompt for the user to run manually in Google Omni? If the Higgsfield MCP tools aren't loaded/connected in this session, say so and default to handing over the prompt with usage instructions (upload the source video into Google Omni, select it as source footage, paste the prompt).
+
+## Step 5 — Optional: generate via Higgsfield MCP
+
+Only run this if the user asked to generate now and the Higgsfield MCP tools are available. This replaces manually pasting into Google Omni and manually re-attaching audio in DaVinci afterward — the skill does both automatically.
+
+**Hard-won rules (do not deviate — each one caused a broken generation in production):**
+
+- Model **`seedance_2_5`**, param **`mode: "video_edit"`** — NOT `"video_extension"` (that generates new continuation footage, fabricating speech instead of reframing the original) and NOT the default `t2v` mode with no media reference (that ignores the source video entirely). `video_edit` is billed by the source video's own duration, so `duration`/`aspect_ratio` params are ignored and don't need to match anything.
+- Pass the uploaded source video as `medias: [{"value": "<media_id>", "role": "video_references"}]`.
+- Always set **`generate_audio: false`**. Even in `video_edit` mode the model can resynthesize or subtly alter the voice — never trust generated audio. Treat the Higgsfield output as video-only.
+- Always preflight with `get_cost: true` before submitting, and confirm the credit cost with the user before spending — cost varies a lot by resolution/duration (a full 15s clip at 1080p is ~180+ credits vs. ~24 for a short default-duration test).
+- Higgsfield may return a `preset_recommendation` notice instead of generating literally (it pattern-matches the prompt to a gallery preset). Decline it: retry the same call with `declined_preset_id` set to the offered preset's id, so the literal prompt actually runs.
+- Jobs can take 10+ minutes for a full-length 1080p `video_edit`. Poll with `jobs_wait` patiently (it won't be done in the first few checks) rather than assuming failure.
+
+**Procedure:**
+
+1. Upload the source video: `media_upload` (filename + content_type) → run the returned `curl -X PUT` command with the local video's bytes → `media_confirm` with the returned `media_id` and `type: "video"`.
+2. `get_cost: true` preflight with `model: "seedance_2_5"`, `mode: "video_edit"`, the uploaded media as `video_references`, `generate_audio: false`, and a `resolution` (ask the user 720p vs 1080p if cost matters to them). Report the credit cost and get explicit confirmation before submitting.
+3. Submit for real (same params, no `get_cost`). If a `preset_recommendation` notice comes back, resubmit with `declined_preset_id` set to that preset's id.
+4. `jobs_wait` on the returned job id. If still queued/in_progress, say so and keep checking rather than declaring failure — do not resubmit while the original job is still active.
+5. On `completed`, download `result_url` locally (curl).
+6. Remux the user's real audio onto the (silent) Higgsfield output — never use whatever audio Higgsfield produced:
+   ```bash
+   ffmpeg -y -i "<higgsfield_output.mp4>" -i "<original source video>" \
+     -map 0:v:0 -map 1:a:0 -c:v copy -c:a aac -shortest "<video basename>_multicam_final.mp4"
+   ```
+7. Save next to the source video as `<video basename>_multicam_final.mp4` and deliver it to the user (e.g. via SendUserFile). Mention the final duration so the user can sanity-check it matches the source.
 
 ## The canonical template (FROZEN)
 
@@ -150,3 +179,7 @@ Static camera positions only — the template forbids zooms, pans, morphs and an
 - Do NOT change the shot count — always 4 cuts, and cut 4 always returns to the opening framing.
 - Do NOT strip the square brackets when filling the timestamps: `* At [5.7s]:` is correct, `* At 5.7s:` is wrong — check all four lines before saving.
 - Do NOT skip the checkpoint or deliver before the user answers it.
+- Do NOT use `seedance_2_5` in `video_extension` mode, or with no `medias` reference at all, for this technique — both were tried in production and both fabricate new footage/speech instead of reframing the source. `video_edit` mode only.
+- Do NOT trust a video-generation model's own audio output, even with a "preserve audio" instruction in the prompt. Set `generate_audio: false` and remux the real source audio back on with ffmpeg — this is the only reliable way to guarantee the voice.
+- Do NOT run the output through a dubbing/lip-sync/translation step unless the user explicitly asked for a dubbed language version — that step's entire purpose is to replace the original voice, and it's the most common cause of "the voice completely changed."
+- Do NOT let a `preset_recommendation` notice silently swap in a gallery preset — decline it with `declined_preset_id` and resubmit so the literal prompt actually runs.
